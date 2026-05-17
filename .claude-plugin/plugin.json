@@ -1,0 +1,9 @@
+{
+  "name": "gstack",
+  "version": "1.39.2.0",
+  "description": "Garry Tan's gstack AI workflow skills, packaged as a Claude Code plugin. Original: https://github.com/garrytan/gstack. Fork adds CC plugin structure with gstack: namespace.",
+  "author": {
+    "name": "Garry Tan (original), Joe Black (fork/plugin)",
+    "url": "https://github.com/garrytan/gstack"
+  }
+}

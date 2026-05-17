@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+# gstack — manage the gstack CC plugin
+#
+# Usage:
+#   gstack update       — sync from upstream, rebuild, push, release, update marketplace
+#   gstack rebuild      — regenerate skills/ symlinks (no git ops)
+#   gstack status       — show version and CC plugin registration status
+#   gstack install      — register plugin in Claude Code settings
+#   gstack release      — create/update GitHub release at current VERSION
+#   gstack marketplace  — update agent-marketplace entry and push
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+GH="$(command -v gh 2>/dev/null || echo gh)"
+
+GSTACK_DIR="$(cd "$(dirname "$0")/.." && pwd -P)"
+MARKETPLACE_DIR="$HOME/github/joeblackwaslike/agent-marketplace"
+PLUGINS_JSON="$HOME/.claude/plugins/installed_plugins.json"
+SETTINGS_JSON="$HOME/.claude/settings.json"
+
+cmd="${1:-help}"
+shift 2>/dev/null || true
+
+_version() { cat "$GSTACK_DIR/VERSION"; }
+_semver() {
+  python3 -c "v='$(_version)'.split('.'); print('.'.join(v[:3]))"
+}
+
+case "$cmd" in
+
+  update)
+    echo "==> Syncing from upstream..."
+    cd "$GSTACK_DIR"
+    git pull upstream main
+
+    echo "==> Rebuilding..."
+    bun run build
+
+    echo "==> Staging and committing..."
+    git add -A
+    if ! git diff --cached --quiet; then
+      git commit -m "chore: sync to upstream v$(_version)"
+    else
+      echo "    (nothing to commit)"
+    fi
+
+    echo "==> Tagging v$(_version)..."
+    git tag -f "v$(_version)"
+
+    echo "==> Pushing fork + tag..."
+    git push origin main
+    git push origin "v$(_version)" --force
+
+    "$GSTACK_DIR/bin/gstack" release
+    "$GSTACK_DIR/bin/gstack" marketplace
+    echo "==> Done. Plugin at v$(_version)."
+    ;;
+
+  rebuild)
+    echo "Relinking plugin skills..."
+    cd "$GSTACK_DIR"
+    bun run link:plugin-skills
+    echo "Done."
+    ;;
+
+  status)
+    version="$(_version)"
+    echo "gstack plugin v$version"
+    echo "  repo: $GSTACK_DIR"
+    if python3 -c "
+import json, sys
+d = json.load(open('$PLUGINS_JSON'))
+sys.exit(0 if 'gstack@joeblackwaslike' in d.get('plugins', {}) else 1)
+" 2>/dev/null; then
+      echo "  CC status: registered (gstack@joeblackwaslike)"
+    else
+      echo "  CC status: NOT registered — run: gstack install"
+    fi
+    ;;
+
+  install)
+    version="$(_version)"
+    now="$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")"
+    python3 - "$GSTACK_DIR" "$version" "$now" <<'PYEOF'
+import json, sys, os
+gstack_dir, version, now = sys.argv[1], sys.argv[2], sys.argv[3]
+home = os.path.expanduser("~")
+
+plugins_path = f"{home}/.claude/plugins/installed_plugins.json"
+with open(plugins_path) as f:
+    data = json.load(f)
+data.setdefault("plugins", {})["gstack@joeblackwaslike"] = [{
+    "scope": "user",
+    "installPath": gstack_dir,
+    "version": version,
+    "installedAt": now,
+    "lastUpdated": now,
+}]
+with open(plugins_path, "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+
+settings_path = f"{home}/.claude/settings.json"
+with open(settings_path) as f:
+    settings = json.load(f)
+settings.setdefault("enabledPlugins", {})["gstack@joeblackwaslike"] = True
+with open(settings_path, "w") as f:
+    json.dump(settings, f, indent=2)
+    f.write("\n")
+
+print(f"Registered gstack@joeblackwaslike v{version} in Claude Code.")
+PYEOF
+    ;;
+
+  release)
+    version="$(_version)"
+    notes="Synced from garrytan/gstack v${version}. Packages all gstack skills as a Claude Code plugin with gstack: namespace."
+    if "$GH" release view "v$version" --repo joeblackwaslike/gstack &>/dev/null; then
+      echo "Updating existing release v$version..."
+      "$GH" release edit "v$version" \
+        --title "gstack $version" \
+        --notes "$notes" \
+        --repo joeblackwaslike/gstack
+    else
+      echo "Creating release v$version..."
+      "$GH" release create "v$version" \
+        --title "gstack $version" \
+        --notes "$notes" \
+        --target main \
+        --repo joeblackwaslike/gstack
+    fi
+    echo "Release v$version published."
+    ;;
+
+  marketplace)
+    version="$(_version)"
+    semver="$(_semver)"
+    if [ ! -d "$MARKETPLACE_DIR" ]; then
+      echo "ERROR: agent-marketplace not found at $MARKETPLACE_DIR" >&2
+      exit 1
+    fi
+    python3 - "$MARKETPLACE_DIR" "$semver" <<'PYEOF'
+import json, sys
+mkt_dir, version = sys.argv[1], sys.argv[2]
+mkt_path = f"{mkt_dir}/.claude-plugin/marketplace.json"
+with open(mkt_path) as f:
+    mkt = json.load(f)
+for plugin in mkt["plugins"]:
+    if plugin["name"] == "gstack":
+        plugin["version"] = version
+        print(f"Updated gstack to v{version}")
+        break
+else:
+    mkt["plugins"].append({
+        "name": "gstack",
+        "description": "Garry Tan's gstack AI workflow skills, packaged as a Claude Code plugin with gstack: namespace. 47 skills including ship, review, qa, browse, investigate, office-hours, and more. Fork of garrytan/gstack.",
+        "source": {"source": "url", "url": "https://github.com/joeblackwaslike/gstack.git"},
+        "version": version,
+        "category": "productivity",
+        "keywords": ["gstack", "workflow", "skills", "ship", "review", "qa", "browse", "garrytan"]
+    })
+    print(f"Added gstack at v{version}")
+with open(mkt_path, "w") as f:
+    json.dump(mkt, f, indent=2)
+    f.write("\n")
+PYEOF
+    cd "$MARKETPLACE_DIR"
+    git add .claude-plugin/marketplace.json
+    if ! git diff --cached --quiet; then
+      git commit -m "gstack: update to v$semver"
+      git push
+      echo "Marketplace updated to v$semver."
+    else
+      echo "Marketplace already at v$semver, nothing to push."
+    fi
+    ;;
+
+  *)
+    echo "Usage: gstack <update|rebuild|status|install|release|marketplace>"
+    echo ""
+    echo "  update       sync from upstream + rebuild + push + release + marketplace"
+    echo "  rebuild      regenerate skills/ symlinks (no git ops)"
+    echo "  status       show version and CC plugin registration status"
+    echo "  install      register plugin in Claude Code settings"
+    echo "  release      create/update GitHub release at current VERSION"
+    echo "  marketplace  update agent-marketplace entry and push"
+    exit 1
+    ;;
+esac

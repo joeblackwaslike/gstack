@@ -1,5 +1,7 @@
 # gstack
 
+**Fork by [Joe Black](https://github.com/joeblackwaslike):** This is a fork of [garrytan/gstack](https://github.com/garrytan/gstack), Garry Tan's AI workflow skills suite. The only addition is packaging it as a Claude Code plugin with `gstack:` namespace so all skills are namespaced (`gstack:ship`, `gstack:review`, etc.) instead of living at the top level. Everything else — the skills, the philosophy, the engineering — is credited to Garry Tan and upstream contributors. This fork syncs periodically from upstream. Install: `claude plugin install gstack@joeblackwaslike`.
+
 > "I don't think I've typed like a line of code probably since December, basically, which is an extremely large change." — [Andrej Karpathy](https://fortune.com/2026/03/21/andrej-karpathy-openai-cofounder-ai-agents-coding-state-of-psychosis-openclaw/), No Priors podcast, March 2026
 
 When I heard Karpathy say this, I wanted to find out how. How does one person ship like a team of twenty? Peter Steinberger built [OpenClaw](https://github.com/openclaw/openclaw) — 247K GitHub stars — essentially solo with AI agents. The revolution is here. A single builder with the right tooling can move faster than a traditional team.
