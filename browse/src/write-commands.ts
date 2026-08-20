@@ -11,12 +11,14 @@ import { findInstalledBrowsers, importCookies, importCookiesViaCdp, hasV20Cookie
 import { generatePickerCode } from './cookie-picker-routes';
 import { validateNavigationUrl } from './url-validation';
 import { validateOutputPath, validateReadPath } from './path-security';
+import { guardScreenshotPath } from './screenshot-size-guard';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { SetContentWaitUntil } from './tab-session';
 import { TEMP_DIR, isPathWithin } from './platform';
 import { SAFE_DIRECTORIES } from './path-security';
 import { modifyStyle, undoModification, resetModifications, getModificationHistory } from './cdp-inspector';
+import { withCdpSession } from './cdp-bridge';
 
 /**
  * Aggressive page cleanup selectors and heuristics.
@@ -247,11 +249,11 @@ export async function handleWriteCommand(
       if (!filePath) throw new Error('Usage: browse load-html <file> [--wait-until load|domcontentloaded|networkidle] [--tab-id <N>]  |  load-html --from-file <payload.json> [--tab-id <N>]');
 
       // Extension allowlist
-      const ALLOWED_EXT = ['.html', '.htm', '.xhtml', '.svg'];
+      const ALLOWED_EXT = ['.html', '.htm', '.xhtml'];
       const ext = path.extname(filePath).toLowerCase();
       if (!ALLOWED_EXT.includes(ext)) {
         throw new Error(
-          `load-html: file does not appear to be HTML. Expected .html/.htm/.xhtml/.svg, got ${ext || '(no extension)'}. Rename the file if it's really HTML.`
+          `load-html: file does not appear to be HTML. Expected .html/.htm/.xhtml, got ${ext || '(no extension)'}. Rename the file if it's really HTML.`
         );
       }
 
@@ -375,11 +377,14 @@ export async function handleWriteCommand(
       const value = valueParts.join(' ');
       if (!selector || !value) throw new Error('Usage: browse fill <selector> <value>');
       const resolved = await session.resolveRef(selector);
-      if ('locator' in resolved) {
-        await resolved.locator.fill(value, { timeout: 5000 });
-      } else {
-        await target.locator(resolved.selector).fill(value, { timeout: 5000 });
-      }
+      const locator = 'locator' in resolved ? resolved.locator : target.locator(resolved.selector);
+      await locator.fill(value, { timeout: 5000 });
+      // Playwright's fill() only dispatches an `input` event. Frameworks that
+      // validate on `change` (AngularJS ng-change, debounced strength/match
+      // checks — e.g. cPanel's Jupiter theme) never see the update, so a value
+      // that's correct in the DOM can still fail the framework's own
+      // validation. Dispatch `change` too so those listeners fire.
+      await locator.dispatchEvent('change');
       // Wait for network to settle (form validation XHRs)
       await page.waitForLoadState('networkidle', { timeout: 2000 }).catch(() => {});
       return `Filled ${selector}`;
@@ -749,7 +754,7 @@ export async function handleWriteCommand(
       const code = generatePickerCode();
       const pickerUrl = `http://127.0.0.1:${port}/cookie-picker?code=${code}`;
       try {
-        Bun.spawn(['open', pickerUrl], { stdout: 'ignore', stderr: 'ignore' });
+        Bun.spawn(['open', pickerUrl], { stdout: 'ignore', stderr: 'ignore', windowsHide: true });
       } catch (err: any) {
         // open may fail on non-macOS or if 'open' binary is missing — URL is in the message below
         if (err?.code !== 'ENOENT' && !err?.message?.includes('spawn')) throw err;
@@ -1123,6 +1128,10 @@ export async function handleWriteCommand(
 
       // Take screenshot
       await page.screenshot({ path: outputPath, fullPage: !scrollTo });
+      // Guard against Anthropic vision API >2000px brick (#1214). Only
+      // applies to fullPage captures; scrollTo viewport-bound shots are
+      // already capped by the viewport size.
+      if (!scrollTo) await guardScreenshotPath(outputPath);
 
       // Restore viewport
       if (viewportWidth && originalViewport) {
@@ -1404,9 +1413,10 @@ export async function handleWriteCommand(
       validateOutputPath(outputPath);
 
       try {
-        const cdp = await page.context().newCDPSession(page);
-        const { data } = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
-        await cdp.detach();
+        const data = await withCdpSession(page, async (cdp) => {
+          const result = await cdp.send('Page.captureSnapshot', { format: 'mhtml' });
+          return (result as { data: string }).data;
+        });
         fs.writeFileSync(outputPath, data);
         return `Archive saved: ${outputPath} (${Math.round(data.length / 1024)}KB, MHTML)`;
       } catch (err: any) {
